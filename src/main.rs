@@ -11,6 +11,7 @@ use tracing::{debug, error, info, warn};
 use rustysquid::{
     calculate_ttl, create_cache_key, extract_host, is_cacheable, parse_request, CachedResponse,
     ProxyCache, CACHE_SIZE, MAX_CONNECTIONS, MAX_REQUEST_SIZE, MAX_RESPONSE_SIZE,
+    connection_pool::ConnectionPool,
 };
 
 const PROXY_PORT: u16 = 3128;
@@ -59,7 +60,7 @@ fn validate_request(buffer: &[u8]) -> Result<(String, String, Vec<String>), &'st
 /// Serve response from cache
 async fn serve_cached_response(
     client: &mut TcpStream,
-    cached: CachedResponse,
+    cached: Arc<CachedResponse>,
 ) -> Result<(), &'static str> {
     client.write_all(cached.status_line.as_bytes()).await
         .map_err(|_| "Failed to write status")?;
@@ -79,16 +80,6 @@ async fn serve_cached_response(
     Ok(())
 }
 
-/// Connect to upstream server
-async fn connect_upstream(host: &str, port: u16) -> Result<TcpStream, &'static str> {
-    timeout(
-        Duration::from_secs(10),
-        TcpStream::connect((host, port)),
-    )
-    .await
-    .map_err(|_| "Connection timeout")?
-    .map_err(|_| "Connection failed")
-}
 
 /// Forward request to upstream and get response
 async fn forward_to_upstream(
@@ -181,6 +172,7 @@ fn parse_response_for_cache(
 async fn handle_client(
     mut client: TcpStream,
     cache: ProxyCache,
+    pool: ConnectionPool,
     _active_connections: Arc<AtomicUsize>,
 ) {
     // Step 1: Read request
@@ -228,11 +220,11 @@ async fn handle_client(
     
     debug!("CACHE MISS: {}{}", host, path);
     
-    // Step 4: Connect to upstream
-    let mut upstream = match connect_upstream(host, port).await {
+    // Step 4: Get connection from pool
+    let mut upstream = match pool.get_connection(host, port).await {
         Ok(stream) => stream,
         Err(e) => {
-            debug!("Failed to connect upstream: {}", e);
+            debug!("Failed to get connection from pool: {}", e);
             send_error_response(&mut client, b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await;
             return;
         }
@@ -254,7 +246,10 @@ async fn handle_client(
         return;
     }
     
-    // Step 7: Cache response if applicable
+    // Step 7: Return connection to pool
+    pool.return_connection(host.to_string(), port, upstream).await;
+    
+    // Step 8: Cache response if applicable
     if let Some(cached_response) = parse_response_for_cache(&response_buffer, &method, &path) {
         let ttl = cached_response.expires - SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -268,7 +263,7 @@ async fn handle_client(
 }
 
 /// Connection acceptor with proper connection limiting
-async fn accept_connections(listener: TcpListener, cache: ProxyCache) {
+async fn accept_connections(listener: TcpListener, cache: ProxyCache, pool: ConnectionPool) {
     let active_connections = Arc::new(AtomicUsize::new(0));
     
     loop {
@@ -289,12 +284,13 @@ async fn accept_connections(listener: TcpListener, cache: ProxyCache) {
         
         // Handle client
         let cache_clone = cache.clone();
+        let pool_clone = pool.clone();
         let connections = Arc::clone(&active_connections);
         
         connections.fetch_add(1, Ordering::Relaxed);
         
         tokio::spawn(async move {
-            handle_client(stream, cache_clone, connections.clone()).await;
+            handle_client(stream, cache_clone, pool_clone, connections.clone()).await;
             connections.fetch_sub(1, Ordering::Relaxed);
         });
     }
@@ -310,14 +306,15 @@ async fn main() {
         )
         .init();
 
-    info!("RustySquid v1.1.0 - HTTP Cache Proxy with PMAT Quality Standards");
+    info!("RustySquid v1.2.0 - HTTP Cache Proxy with Connection Pooling");
     info!("Listening on port {}", PROXY_PORT);
     info!("Cache size: {} entries", CACHE_SIZE);
     info!("Max connections: {}", MAX_CONNECTIONS);
     info!("Max cached response: {} MB", MAX_RESPONSE_SIZE / 1_048_576);
 
-    // Initialize cache
+    // Initialize cache and connection pool
     let cache = ProxyCache::new();
+    let pool = ConnectionPool::new();
 
     // Bind to port
     let listener = match TcpListener::bind(("0.0.0.0", PROXY_PORT)).await {
@@ -338,7 +335,7 @@ async fn main() {
 
     // Run server
     tokio::select! {
-        _ = accept_connections(listener, cache) => {},
+        _ = accept_connections(listener, cache, pool) => {},
         _ = shutdown => {},
     }
 }

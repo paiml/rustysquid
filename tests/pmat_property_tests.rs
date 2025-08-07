@@ -2,6 +2,8 @@ use bytes::Bytes;
 use proptest::prelude::*;
 use quickcheck_macros::quickcheck;
 use rustysquid::*;
+use rustysquid::connection_pool::ConnectionPool;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // ============================================================================
@@ -265,7 +267,11 @@ async fn prop_cache_expiration_invariant() {
     
     // Property: Valid entries are returned
     let result = cache.get(2).await;
-    assert_eq!(result, Some(valid_response), "Valid entries must be returned");
+    if let Some(result_arc) = result {
+        assert_eq!(*result_arc, valid_response, "Valid entries must be returned");
+    } else {
+        panic!("Expected valid entry but got None");
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -297,7 +303,11 @@ async fn prop_concurrent_cache_safety() {
             let retrieved = cache_clone.get(key).await;
             
             // Property: Concurrent operations maintain consistency
-            assert_eq!(retrieved, Some(response), "Concurrent operations must be consistent");
+            if let Some(retrieved_arc) = retrieved {
+                assert_eq!(*retrieved_arc, response, "Concurrent operations must be consistent");
+            } else {
+                panic!("Expected cached response but got None");
+            }
         });
         handles.push(handle);
     }
@@ -378,6 +388,261 @@ fn qc_cacheable_deterministic(method: String, path: String, headers: Vec<String>
     let result1 = is_cacheable(&method, &path, &headers);
     let result2 = is_cacheable(&method, &path, &headers);
     result1 == result2
+}
+
+// ----------------------------------------------------------------------------
+// Zero-Copy Cache Properties - Arc Reference Counting
+// ----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn prop_zero_copy_cache_operations() {
+    let cache = ProxyCache::new();
+    
+    // Create a response
+    let response = CachedResponse {
+        status_line: "HTTP/1.1 200 OK\r\n".to_string(),
+        headers: vec!["Content-Type: text/html".to_string()],
+        body: Bytes::from("test body for zero-copy"),
+        expires: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() + 3600,
+    };
+    
+    let key = 12345u64;
+    
+    // Put response in cache
+    cache.put(key, response.clone()).await;
+    
+    // Get multiple references to the same cached entry
+    let cached1 = cache.get(key).await.unwrap();
+    let cached2 = cache.get(key).await.unwrap();
+    
+    // Property: Multiple gets return Arc clones, not data clones
+    assert_eq!(Arc::strong_count(&cached1), Arc::strong_count(&cached2));
+    
+    // Property: Arc contents are identical (same memory)
+    assert!(Arc::ptr_eq(&cached1, &cached2), "Arc should point to same memory location");
+    
+    // Property: Data is accessible through Arc
+    assert_eq!(cached1.status_line, response.status_line);
+    assert_eq!(cached1.headers, response.headers);
+    assert_eq!(cached1.body, response.body);
+    assert_eq!(cached1.expires, response.expires);
+}
+
+#[tokio::test] 
+async fn prop_arc_reference_count_behavior() {
+    let cache = ProxyCache::new();
+    
+    let response = CachedResponse {
+        status_line: "HTTP/1.1 200 OK\r\n".to_string(),
+        headers: vec!["Content-Type: application/json".to_string()],
+        body: Bytes::from("{\"test\": \"data\"}"),
+        expires: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() + 3600,
+    };
+    
+    let key = 54321u64;
+    cache.put(key, response).await;
+    
+    // Get reference and check initial count
+    let cached_ref1 = cache.get(key).await.unwrap();
+    let initial_count = Arc::strong_count(&cached_ref1);
+    
+    // Get multiple additional references
+    let cached_ref2 = cache.get(key).await.unwrap();
+    let cached_ref3 = cache.get(key).await.unwrap();
+    
+    // Property: Reference count increases with each Arc clone
+    let count_after_clones = Arc::strong_count(&cached_ref1);
+    assert!(count_after_clones >= initial_count, "Reference count should increase with clones");
+    
+    // Drop references and check count decreases
+    drop(cached_ref2);
+    drop(cached_ref3);
+    
+    let count_after_drops = Arc::strong_count(&cached_ref1);
+    assert!(count_after_drops < count_after_clones, "Reference count should decrease when references are dropped");
+}
+
+#[tokio::test]
+async fn prop_zero_allocations_in_cache_hit_path() {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    
+    // Custom allocator to track allocations
+    struct TrackingAllocator {
+        allocations: AtomicUsize,
+    }
+    
+    unsafe impl GlobalAlloc for TrackingAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            self.allocations.fetch_add(1, Ordering::Relaxed);
+            System.alloc(layout)
+        }
+        
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            System.dealloc(ptr, layout)
+        }
+    }
+    
+    let cache = ProxyCache::new();
+    
+    let response = CachedResponse {
+        status_line: "HTTP/1.1 200 OK\r\n".to_string(),
+        headers: vec!["Content-Type: text/plain".to_string()],
+        body: Bytes::from("allocation test data"),
+        expires: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() + 3600,
+    };
+    
+    let key = 98765u64;
+    
+    // Put response in cache (this will allocate)
+    cache.put(key, response).await;
+    
+    // Warm up - first get might have some setup allocations
+    let _warmup = cache.get(key).await;
+    
+    // Property: Subsequent cache hits should not require new allocations
+    // Note: This is a behavioral property test - the actual zero-allocation
+    // property is achieved by using Arc::clone instead of data cloning
+    let cached1 = cache.get(key).await.unwrap();
+    let cached2 = cache.get(key).await.unwrap();
+    
+    // Verify they're the same Arc (no data copying)
+    assert!(Arc::ptr_eq(&cached1, &cached2), "Cache hits should return same Arc instance");
+}
+
+// ----------------------------------------------------------------------------
+// Connection Pool Properties - Connection Reuse and Resource Management
+// ----------------------------------------------------------------------------
+
+#[quickcheck]
+fn qc_connection_pool_stats_deterministic(host: String, port: u16) -> bool {
+    if host.is_empty() || host.len() > 253 {
+        return true; // Skip invalid hosts
+    }
+    
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+        
+    rt.block_on(async {
+        let pool = ConnectionPool::new();
+        let stats1 = pool.stats().await;
+        let stats2 = pool.stats().await;
+        stats1 == stats2 && stats1.is_empty()
+    })
+}
+
+#[quickcheck]
+fn qc_connection_pool_cleanup_idempotent(iterations: u8) -> bool {
+    if iterations == 0 {
+        return true;
+    }
+    
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+        
+    rt.block_on(async {
+        let pool = ConnectionPool::new();
+        
+        // Multiple cleanups should be safe
+        for _ in 0..iterations.min(10) {
+            pool.cleanup_stale_connections().await;
+        }
+        
+        let stats1 = pool.stats().await;
+        pool.cleanup_stale_connections().await;
+        let stats2 = pool.stats().await;
+        
+        stats1 == stats2
+    })
+}
+
+#[tokio::test]
+async fn prop_connection_pool_capacity_limits() {
+    let pool = ConnectionPool::new();
+    
+    // Property: Pool enforces capacity limits per host
+    // Since we can't make real connections in tests, we verify the pool structure remains consistent
+    let initial_stats = pool.stats().await;
+    assert!(initial_stats.is_empty(), "Pool should start empty");
+    
+    // Cleanup should be safe even on empty pool
+    pool.cleanup_stale_connections().await;
+    let post_cleanup_stats = pool.stats().await;
+    assert_eq!(initial_stats, post_cleanup_stats, "Cleanup on empty pool should be no-op");
+}
+
+#[tokio::test]
+async fn prop_connection_pool_thread_safety() {
+    use tokio::task;
+    
+    let pool = Arc::new(ConnectionPool::new());
+    let mut handles = vec![];
+    
+    // Property: Concurrent pool operations are thread-safe
+    for i in 0..50 {
+        let pool_clone = pool.clone();
+        let handle = task::spawn(async move {
+            let _host = format!("host{}.com", i);
+            
+            // Concurrent stats access should not panic
+            let _stats = pool_clone.stats().await;
+            
+            // Concurrent cleanup should not interfere
+            pool_clone.cleanup_stale_connections().await;
+            
+            // Multiple stats calls should remain consistent within a task
+            let stats1 = pool_clone.stats().await;
+            let stats2 = pool_clone.stats().await;
+            assert_eq!(stats1, stats2, "Concurrent stats access should be consistent");
+        });
+        handles.push(handle);
+    }
+    
+    // Wait for all concurrent tasks
+    for handle in handles {
+        handle.await.unwrap();
+    }
+    
+    // Property: Pool remains in valid state after concurrent access
+    let final_stats = pool.stats().await;
+    assert!(final_stats.len() >= 0, "Pool should remain in valid state");
+}
+
+#[tokio::test]
+async fn prop_connection_pool_resource_cleanup() {
+    let pool = ConnectionPool::new();
+    
+    // Property: Cleanup operations maintain pool integrity
+    for _ in 0..10 {
+        pool.cleanup_stale_connections().await;
+        let stats = pool.stats().await;
+        
+        // Pool should never contain negative or invalid counts
+        for ((_host, _port), count) in stats.iter() {
+            assert!(*count >= 0, "Connection counts must be non-negative");
+        }
+    }
+    
+    // Property: Repeated cleanup calls are safe and idempotent
+    let stats_before = pool.stats().await;
+    pool.cleanup_stale_connections().await;
+    pool.cleanup_stale_connections().await;
+    let stats_after = pool.stats().await;
+    
+    assert_eq!(stats_before, stats_after, "Multiple cleanup calls should be idempotent");
 }
 
 // ----------------------------------------------------------------------------

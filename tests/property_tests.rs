@@ -1,6 +1,7 @@
 use bytes::Bytes;
 use proptest::prelude::*;
 use rustysquid::*;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // Property: Cache keys should be deterministic
@@ -222,7 +223,11 @@ async fn prop_cache_concurrent_safety() {
             };
             cache_clone.put(key, response.clone()).await;
             let retrieved = cache_clone.get(key).await;
-            assert_eq!(retrieved, Some(response));
+            if let Some(retrieved_arc) = retrieved {
+                assert_eq!(*retrieved_arc, response);
+            } else {
+                panic!("Expected cached response but got None");
+            }
         });
         handles.push(handle);
     }

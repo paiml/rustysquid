@@ -1,6 +1,6 @@
 [package]
 name = "rustysquid"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2021"
 authors = ["Noah <noah@paiml.com>"]
 description = "High-performance HTTP caching proxy optimized for embedded systems and routers"

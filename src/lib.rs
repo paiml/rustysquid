@@ -5,9 +5,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
-use xxhash_rust::xxh64::xxh64;
 
 pub mod memory;
+pub mod connection_pool;
 
 /// Maximum number of cache entries
 pub const CACHE_SIZE: usize = 10000;
@@ -57,7 +57,7 @@ pub struct CachedResponse {
 /// Thread-safe LRU cache for HTTP responses
 #[derive(Clone)]
 pub struct ProxyCache {
-    cache: Arc<Mutex<LruCache<u64, CachedResponse>>>,
+    cache: Arc<Mutex<LruCache<u64, Arc<CachedResponse>>>>,
     total_size: Arc<AtomicUsize>,
 }
 
@@ -103,7 +103,7 @@ impl ProxyCache {
     }
 
     /// Get a cached response by key, returns None if not found or expired
-    pub async fn get(&self, key: u64) -> Option<CachedResponse> {
+    pub async fn get(&self, key: u64) -> Option<Arc<CachedResponse>> {
         let mut cache = self.cache.lock().await;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -112,7 +112,7 @@ impl ProxyCache {
 
         if let Some(entry) = cache.get(&key) {
             if entry.expires > now {
-                return Some(entry.clone());
+                return Some(Arc::clone(entry));
             }
             // Remove expired entry and update size
             if let Some(expired) = cache.pop(&key) {
@@ -158,8 +158,8 @@ impl ProxyCache {
             self.total_size.fetch_sub(old_size, Ordering::Relaxed);
         }
 
-        // Add new entry
-        cache.put(key, response);
+        // Add new entry wrapped in Arc
+        cache.put(key, Arc::new(response));
         self.total_size.fetch_add(entry_size, Ordering::Relaxed);
         true
     }
@@ -220,6 +220,7 @@ impl ProxyCache {
                 .sum::<usize>()
             + entry.body.len()
             + std::mem::size_of::<u64>() // expires field
+            + std::mem::size_of::<Arc<CachedResponse>>() // Arc overhead
     }
 }
 
@@ -369,9 +370,16 @@ pub fn calculate_ttl(headers: &[String]) -> u64 {
     CACHE_TTL
 }
 
-/// Create a cache key from request parameters
+/// Create a cache key from request parameters without allocation
 pub fn create_cache_key(host: &str, port: u16, path: &str) -> u64 {
-    xxh64(format!("{host}:{port}{path}").as_bytes(), 0)
+    use xxhash_rust::xxh64::Xxh64;
+    
+    let mut hasher = Xxh64::new(0);
+    hasher.update(host.as_bytes());
+    hasher.update(b":");
+    hasher.update(&port.to_le_bytes());
+    hasher.update(path.as_bytes());
+    hasher.digest()
 }
 
 #[cfg(test)]
@@ -465,7 +473,8 @@ mod tests {
 
         let cached = cache.get(key).await;
         assert!(cached.is_some());
-        assert_eq!(cached.unwrap(), response);
+        let cached_arc = cached.unwrap();
+        assert_eq!(*cached_arc, response);
 
         // Test cache clear
         cache.clear().await;

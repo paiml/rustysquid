@@ -1,0 +1,62 @@
+#!/bin/sh /etc/rc.common
+# RustySquid init script for OpenWrt
+# Place this file in /etc/init.d/rustysquid on the router
+
+START=95
+STOP=10
+
+USE_PROCD=1
+PROG=/tmp/rustysquid
+PIDFILE=/var/run/rustysquid.pid
+
+start_service() {
+    procd_open_instance
+    procd_set_param command $PROG
+    procd_set_param respawn
+    procd_set_param pidfile $PIDFILE
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    procd_set_param env RUST_LOG=rustysquid=info
+    procd_close_instance
+    
+    # Wait for service to start
+    sleep 2
+    
+    # Configure transparent proxy rules
+    setup_firewall
+}
+
+stop_service() {
+    # Remove transparent proxy rules
+    cleanup_firewall
+}
+
+setup_firewall() {
+    # Remove any existing rules first
+    iptables -t nat -D PREROUTING -i br-lan -p tcp --dport 80 -j REDIRECT --to-port 3128 2>/dev/null || true
+    iptables -t nat -D PREROUTING -i br-lan -p tcp --dport 443 -j REDIRECT --to-port 3128 2>/dev/null || true
+    
+    # Add transparent proxy rules for HTTP/HTTPS traffic from LAN
+    iptables -t nat -A PREROUTING -i br-lan -p tcp --dport 80 -j REDIRECT --to-port 3128
+    iptables -t nat -A PREROUTING -i br-lan -p tcp --dport 443 -j REDIRECT --to-port 3128
+    
+    # Allow traffic to the proxy port
+    iptables -D INPUT -p tcp --dport 3128 -j ACCEPT 2>/dev/null || true
+    iptables -A INPUT -p tcp --dport 3128 -j ACCEPT
+    
+    logger -t rustysquid "Transparent proxy rules configured"
+}
+
+cleanup_firewall() {
+    # Remove transparent proxy rules
+    iptables -t nat -D PREROUTING -i br-lan -p tcp --dport 80 -j REDIRECT --to-port 3128 2>/dev/null || true
+    iptables -t nat -D PREROUTING -i br-lan -p tcp --dport 443 -j REDIRECT --to-port 3128 2>/dev/null || true
+    iptables -D INPUT -p tcp --dport 3128 -j ACCEPT 2>/dev/null || true
+    
+    logger -t rustysquid "Transparent proxy rules removed"
+}
+
+reload_service() {
+    cleanup_firewall
+    setup_firewall
+}

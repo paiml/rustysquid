@@ -20,7 +20,35 @@ A minimal, memory-safe HTTP caching proxy inspired by Squid, designed for embedd
 
 ## Current Status
 
-✅ **v1.0.0 Production Ready** - All critical safety features implemented
+✅ **v1.1.0 Production Ready** - PMAT quality standards integrated
+
+## Examples
+
+RustySquid includes comprehensive examples demonstrating various use cases:
+
+### Simple Proxy Demo
+```bash
+cargo run --example simple_proxy
+```
+Demonstrates basic cache operations and proxy setup.
+
+### Cache Operations Demo
+```bash
+cargo run --example cache_demo
+```
+Shows cacheability tests, TTL calculation, expiration handling, and size limits.
+
+### Performance Testing
+```bash
+cargo run --example performance_test --release
+```
+Measures cache performance including sequential/concurrent operations and hit vs miss timing.
+
+### Full Proxy Server
+```bash
+cargo run --example full_proxy
+```
+Runs a complete HTTP proxy server on port 8888 with statistics tracking.
 
 ## Quick Start
 
