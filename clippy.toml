@@ -1,0 +1,7 @@
+# Clippy configuration for strict linting
+cognitive-complexity-threshold = 30
+type-complexity-threshold = 250
+single-char-binding-names-threshold = 4
+too-many-lines-threshold = 100
+array-size-threshold = 512
+vec-box-size-threshold = 4096

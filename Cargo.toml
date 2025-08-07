@@ -1,0 +1,41 @@
+[package]
+name = "rustysquid"
+version = "0.1.0"
+edition = "2021"
+authors = ["Noah"]
+description = "Minimal Squid-inspired HTTP caching proxy with safety features for embedded systems"
+license = "MIT"
+repository = "https://github.com/paiml/rustysquid"
+readme = "README.md"
+keywords = ["cache", "proxy", "http", "router"]
+categories = ["network-programming", "caching"]
+
+[dependencies]
+# Minimal async runtime - single-threaded for low memory usage
+tokio = { version = "1.41", features = ["rt", "net", "io-util", "time", "macros", "sync"] }
+# Lightweight HTTP parsing
+httparse = "1.9"
+# Fast hashing for cache
+xxhash-rust = { version = "0.8", features = ["xxh64"] }
+# Efficient byte handling
+bytes = "1.8"
+# Simple LRU cache
+lru = "0.12"
+
+[dev-dependencies]
+# Property-based testing
+proptest = "1.5"
+# Async test runtime
+tokio-test = "0.4"
+# Benchmarking
+criterion = "0.5"
+
+[profile.release]
+opt-level = "z"     # Optimize for size
+lto = true          # Link-time optimization
+codegen-units = 1   # Single codegen unit for better optimization
+strip = true        # Strip symbols
+panic = "abort"     # Smaller panic handler
+
+[target.aarch64-unknown-linux-musl]
+linker = "aarch64-linux-musl-gcc"

@@ -1,0 +1,32 @@
+# Rust
+target/
+Cargo.lock
+*.rs.bk
+*.pdb
+
+# Coverage
+coverage/
+*.lcov
+tarpaulin-report.html
+
+# Benchmarks
+bench-*.txt
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+/tmp/
+
+# Test artifacts
+*.profraw
+*.profdata
