@@ -134,6 +134,67 @@ async fn prop_cache_operations() {
     assert_eq!(cache.len().await, 0);
 }
 
+// Property: Cache size never exceeds MAX_CACHE_BYTES
+#[tokio::test]
+async fn prop_cache_size_never_exceeds_limit() {
+    let cache = ProxyCache::new();
+    
+    for i in 0..100 {
+        let size = (i * 100000) % (MAX_ENTRY_SIZE - 1000) + 1000; // Vary size but stay under limit
+        let response = CachedResponse {
+            status_line: "HTTP/1.1 200 OK\r\n".to_string(),
+            headers: vec!["Content-Type: text/html".to_string()],
+            body: Bytes::from(vec![0u8; size]),
+            expires: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                + 3600,
+        };
+        
+        let key = create_cache_key(&format!("test{}.com", i), 80, "/");
+        cache.put(key, response).await;
+        
+        // Property: total size should never exceed limit
+        assert!(cache.total_size().await <= MAX_CACHE_BYTES);
+    }
+}
+
+// Property: Oversized entries are always rejected
+proptest! {
+    #[test]
+    fn prop_oversized_entries_rejected(
+        extra_bytes in 1usize..1000000usize
+    ) {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let cache = ProxyCache::new();
+            
+            let oversized = CachedResponse {
+                status_line: "HTTP/1.1 200 OK\r\n".to_string(),
+                headers: vec![],
+                body: Bytes::from(vec![0u8; MAX_ENTRY_SIZE + extra_bytes]),
+                expires: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs()
+                    + 3600,
+            };
+            
+            let key = create_cache_key("test.com", 80, "/oversized");
+            let result = cache.put(key, oversized).await;
+            
+            // Property: oversized entries are always rejected
+            prop_assert!(!result);
+            prop_assert_eq!(cache.len().await, 0);
+            Ok(())
+        })?;
+    }
+}
+
 // Property: Cache should handle concurrent access
 #[tokio::test]
 async fn prop_cache_concurrent_safety() {

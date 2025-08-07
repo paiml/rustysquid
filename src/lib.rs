@@ -2,12 +2,15 @@ use bytes::Bytes;
 use lru::LruCache;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 use xxhash_rust::xxh64::xxh64;
 
 pub const CACHE_SIZE: usize = 10000;
 pub const MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024;
+pub const MAX_CACHE_BYTES: usize = 50 * 1024 * 1024; // 50MB total cache size limit
+pub const MAX_ENTRY_SIZE: usize = 5 * 1024 * 1024;   // 5MB per entry limit
 pub const CACHE_TTL: u64 = 3600;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -21,6 +24,7 @@ pub struct CachedResponse {
 #[derive(Clone)]
 pub struct ProxyCache {
     cache: Arc<Mutex<LruCache<u64, CachedResponse>>>,
+    total_size: Arc<AtomicUsize>,
 }
 
 impl ProxyCache {
@@ -32,8 +36,9 @@ impl ProxyCache {
     pub fn new() -> Self {
         Self {
             cache: Arc::new(Mutex::new(LruCache::new(
-                NonZeroUsize::new(CACHE_SIZE).unwrap(),
+                NonZeroUsize::new(CACHE_SIZE).expect("CACHE_SIZE must be non-zero"),
             ))),
+            total_size: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -46,31 +51,77 @@ impl ProxyCache {
         let mut cache = self.cache.lock().await;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_secs();
 
         if let Some(entry) = cache.get(&key) {
             if entry.expires > now {
                 return Some(entry.clone());
             }
-            cache.pop(&key);
+            // Remove expired entry and update size
+            if let Some(expired) = cache.pop(&key) {
+                let size = Self::calculate_entry_size(&expired);
+                self.total_size.fetch_sub(size, Ordering::Relaxed);
+            }
         }
         None
     }
 
-    pub async fn put(&self, key: u64, response: CachedResponse) {
+    pub async fn put(&self, key: u64, response: CachedResponse) -> bool {
+        let entry_size = Self::calculate_entry_size(&response);
+        
+        // Reject entries that are too large
+        if entry_size > MAX_ENTRY_SIZE {
+            return false;
+        }
+
         let mut cache = self.cache.lock().await;
+        
+        // Check if we need to evict entries to make room
+        let mut current_size = self.total_size.load(Ordering::Relaxed);
+        while current_size + entry_size > MAX_CACHE_BYTES && !cache.is_empty() {
+            // Evict LRU entry
+            if let Some((_, evicted)) = cache.pop_lru() {
+                let evicted_size = Self::calculate_entry_size(&evicted);
+                self.total_size.fetch_sub(evicted_size, Ordering::Relaxed);
+                current_size = self.total_size.load(Ordering::Relaxed);
+            } else {
+                break;
+            }
+        }
+        
+        // Remove old entry if it exists
+        if let Some(old) = cache.get(&key) {
+            let old_size = Self::calculate_entry_size(old);
+            self.total_size.fetch_sub(old_size, Ordering::Relaxed);
+        }
+        
+        // Add new entry
         cache.put(key, response);
+        self.total_size.fetch_add(entry_size, Ordering::Relaxed);
+        true
     }
 
     pub async fn clear(&self) {
         let mut cache = self.cache.lock().await;
         cache.clear();
+        self.total_size.store(0, Ordering::Relaxed);
     }
 
     pub async fn len(&self) -> usize {
         let cache = self.cache.lock().await;
         cache.len()
+    }
+    
+    pub async fn total_size(&self) -> usize {
+        self.total_size.load(Ordering::Relaxed)
+    }
+    
+    fn calculate_entry_size(entry: &CachedResponse) -> usize {
+        entry.status_line.len() +
+        entry.headers.iter().map(|h| h.len()).sum::<usize>() +
+        entry.body.len() +
+        std::mem::size_of::<u64>() // expires field
     }
 }
 
@@ -264,6 +315,60 @@ mod tests {
         // Test cache clear
         cache.clear().await;
         assert_eq!(cache.len().await, 0);
+    }
+
+    #[tokio::test]
+    async fn test_cache_size_limit() {
+        let cache = ProxyCache::new();
+        
+        // Create a large response (1MB)
+        let large_response = CachedResponse {
+            status_line: "HTTP/1.1 200 OK\r\n".to_string(),
+            headers: vec!["Content-Type: text/html".to_string()],
+            body: Bytes::from(vec![0u8; 1024 * 1024]), // 1MB
+            expires: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                + 3600,
+        };
+        
+        // Add entries until we exceed the limit
+        for i in 0..60 {
+            let key = create_cache_key("test.com", 80, &format!("/page{}", i));
+            cache.put(key, large_response.clone()).await;
+        }
+        
+        // Total size should not exceed MAX_CACHE_BYTES
+        assert!(cache.total_size().await <= MAX_CACHE_BYTES);
+        
+        // Cache should have evicted some entries
+        assert!(cache.len().await < 60);
+    }
+    
+    #[tokio::test]
+    async fn test_entry_size_limit() {
+        let cache = ProxyCache::new();
+        
+        // Create an oversized response (> MAX_ENTRY_SIZE)
+        let oversized = CachedResponse {
+            status_line: "HTTP/1.1 200 OK\r\n".to_string(),
+            headers: vec![],
+            body: Bytes::from(vec![0u8; MAX_ENTRY_SIZE + 1]),
+            expires: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                + 3600,
+        };
+        
+        let key = create_cache_key("test.com", 80, "/large");
+        let result = cache.put(key, oversized).await;
+        
+        // Should reject oversized entry
+        assert!(!result);
+        assert_eq!(cache.len().await, 0);
+        assert_eq!(cache.total_size().await, 0);
     }
 
     #[tokio::test]

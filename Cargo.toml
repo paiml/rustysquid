@@ -21,6 +21,9 @@ xxhash-rust = { version = "0.8", features = ["xxh64"] }
 bytes = "1.8"
 # Simple LRU cache
 lru = "0.12"
+# Async logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 # Property-based testing
