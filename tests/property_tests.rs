@@ -36,7 +36,7 @@ proptest! {
 // Property: TTL calculation should never exceed 24 hours
 proptest! {
     #[test]
-    fn prop_ttl_max_limit(max_age in 0u64..1000000u64) {
+    fn prop_ttl_max_limit(max_age in 0u64..1_000_000u64) {
         let headers = vec![format!("Cache-Control: max-age={}", max_age)];
         let ttl = calculate_ttl(&headers);
         prop_assert!(ttl <= 86400);
@@ -51,7 +51,7 @@ proptest! {
             ".jpg", ".png", ".css", ".js", ".woff", ".svg"
         ])
     ) {
-        let path = format!("/test{}", extension);
+        let path = format!("/test{extension}");
         let result = is_cacheable("GET", &path, &[]);
         prop_assert!(result);
     }
@@ -64,7 +64,7 @@ proptest! {
         method in prop::sample::select(vec!["POST", "PUT", "DELETE", "PATCH"]),
         path in "/[a-z0-9/]{1,50}\\.(jpg|css|js)"
     ) {
-        let result = is_cacheable(&method, &path, &[]);
+        let result = is_cacheable(method, &path, &[]);
         prop_assert!(!result);
     }
 }
@@ -113,11 +113,11 @@ async fn prop_cache_operations() {
 
     // Property: Cache should grow when adding items
     for i in 0..100 {
-        let key = create_cache_key(&format!("test{}.com", i), 80, "/");
+        let key = create_cache_key(&format!("test{i}.com"), 80, "/");
         let response = CachedResponse {
             status_line: "HTTP/1.1 200 OK\r\n".to_string(),
             headers: vec![],
-            body: Bytes::from(format!("body{}", i)),
+            body: Bytes::from(format!("body{i}")),
             expires: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -138,9 +138,9 @@ async fn prop_cache_operations() {
 #[tokio::test]
 async fn prop_cache_size_never_exceeds_limit() {
     let cache = ProxyCache::new();
-    
+
     for i in 0..100 {
-        let size = (i * 100000) % (MAX_ENTRY_SIZE - 1000) + 1000; // Vary size but stay under limit
+        let size = (i * 100_000) % (MAX_ENTRY_SIZE - 1000) + 1000; // Vary size but stay under limit
         let response = CachedResponse {
             status_line: "HTTP/1.1 200 OK\r\n".to_string(),
             headers: vec!["Content-Type: text/html".to_string()],
@@ -151,12 +151,13 @@ async fn prop_cache_size_never_exceeds_limit() {
                 .as_secs()
                 + 3600,
         };
-        
-        let key = create_cache_key(&format!("test{}.com", i), 80, "/");
-        cache.put(key, response).await;
-        
+
+        let key = create_cache_key(&format!("test{i}.com"), 80, "/");
+        let was_added = cache.put(key, response).await;
+        assert!(was_added);
+
         // Property: total size should never exceed limit
-        assert!(cache.total_size().await <= MAX_CACHE_BYTES);
+        assert!(cache.total_size() <= MAX_CACHE_BYTES);
     }
 }
 
@@ -164,7 +165,7 @@ async fn prop_cache_size_never_exceeds_limit() {
 proptest! {
     #[test]
     fn prop_oversized_entries_rejected(
-        extra_bytes in 1usize..1000000usize
+        extra_bytes in 1usize..1_000_000usize
     ) {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -172,7 +173,7 @@ proptest! {
             .unwrap();
         runtime.block_on(async {
             let cache = ProxyCache::new();
-            
+
             let oversized = CachedResponse {
                 status_line: "HTTP/1.1 200 OK\r\n".to_string(),
                 headers: vec![],
@@ -183,10 +184,10 @@ proptest! {
                     .as_secs()
                     + 3600,
             };
-            
+
             let key = create_cache_key("test.com", 80, "/oversized");
             let result = cache.put(key, oversized).await;
-            
+
             // Property: oversized entries are always rejected
             prop_assert!(!result);
             prop_assert_eq!(cache.len().await, 0);
@@ -208,11 +209,11 @@ async fn prop_cache_concurrent_safety() {
     for i in 0..10 {
         let cache_clone = cache.clone();
         let handle = task::spawn(async move {
-            let key = create_cache_key(&format!("test{}.com", i), 80, "/");
+            let key = create_cache_key(&format!("test{i}.com"), 80, "/");
             let response = CachedResponse {
                 status_line: "HTTP/1.1 200 OK\r\n".to_string(),
                 headers: vec![],
-                body: Bytes::from(format!("body{}", i)),
+                body: Bytes::from(format!("body{i}")),
                 expires: SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap()

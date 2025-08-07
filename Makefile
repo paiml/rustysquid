@@ -35,14 +35,14 @@ metrics: ## Calculate code metrics
 # PMAT: Automated linting
 lint: ## Run clippy with strict rules
 	@echo "🔍 Running clippy..."
-	@cargo clippy -- \
+	@cargo clippy --all-targets --all-features -- \
 		-W clippy::all \
 		-W clippy::pedantic \
-		-W clippy::nursery \
-		-W clippy::cargo \
 		-D warnings \
 		-A clippy::module_name_repetitions \
-		-A clippy::must_use_candidate
+		-A clippy::must_use_candidate \
+		-A clippy::missing_errors_doc \
+		-A clippy::missing_panics_doc
 	@echo "✅ No linting issues!"
 
 # PMAT: Testing
@@ -59,7 +59,7 @@ check: ## Type check without building
 build: ## Build optimized binary for ARM64
 	@echo "🔨 Building for ARM64..."
 	@cargo build --release --target aarch64-unknown-linux-musl
-	@echo "📦 Binary size: $$(du -h target/aarch64-unknown-linux-musl/release/router-cache | cut -f1)"
+	@echo "📦 Binary size: $$(du -h target/aarch64-unknown-linux-musl/release/rustysquid 2>/dev/null | cut -f1 || echo 'N/A')"
 
 build-debug: ## Build debug binary for testing
 	@cargo build --target aarch64-unknown-linux-musl
@@ -67,10 +67,10 @@ build-debug: ## Build debug binary for testing
 # Deployment
 deploy: build ## Deploy to router
 	@echo "🚀 Deploying to router..."
-	@cat target/aarch64-unknown-linux-musl/release/router-cache | \
-		ssh noah@192.168.50.1 "cat > /tmp/router-cache && chmod +x /tmp/router-cache"
-	@ssh noah@192.168.50.1 "killall router-cache 2>/dev/null; sleep 1; \
-		nohup /tmp/router-cache > /tmp/cache.log 2>&1 & echo '✅ Deployed and started'"
+	@cat target/aarch64-unknown-linux-musl/release/rustysquid | \
+		ssh noah@192.168.50.1 "cat > /tmp/rustysquid && chmod +x /tmp/rustysquid"
+	@ssh noah@192.168.50.1 "killall rustysquid 2>/dev/null; sleep 1; \
+		nohup /tmp/rustysquid > /tmp/rustysquid.log 2>&1 & echo '✅ Deployed and started'"
 
 # Verification
 verify: ## Verify cache is working

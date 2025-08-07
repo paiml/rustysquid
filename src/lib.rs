@@ -1,18 +1,51 @@
 use bytes::Bytes;
 use lru::LruCache;
 use std::num::NonZeroUsize;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 use xxhash_rust::xxh64::xxh64;
 
+pub mod memory;
+
+/// Maximum number of cache entries
 pub const CACHE_SIZE: usize = 10000;
+
+/// Maximum size of a single response that can be cached (10MB)
 pub const MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024;
-pub const MAX_CACHE_BYTES: usize = 50 * 1024 * 1024; // 50MB total cache size limit
-pub const MAX_ENTRY_SIZE: usize = 5 * 1024 * 1024;   // 5MB per entry limit
+
+/// Maximum total size of all cached entries (50MB)
+pub const MAX_CACHE_BYTES: usize = 50 * 1024 * 1024;
+
+/// Maximum size of a single cache entry (5MB)
+pub const MAX_ENTRY_SIZE: usize = 5 * 1024 * 1024;
+
+/// Default cache TTL in seconds (1 hour)
 pub const CACHE_TTL: u64 = 3600;
 
+/// Maximum number of concurrent connections
+pub const MAX_CONNECTIONS: usize = 100;
+
+/// Maximum size of request headers (64KB)
+pub const MAX_REQUEST_SIZE: usize = 64 * 1024;
+
+/// A cached HTTP response
+///
+/// # Examples
+///
+/// ```
+/// use rustysquid::CachedResponse;
+/// use bytes::Bytes;
+///
+/// let response = CachedResponse {
+///     status_line: "HTTP/1.1 200 OK".to_string(),
+///     headers: vec!["Content-Type: text/html".to_string()],
+///     body: Bytes::from("<html>Hello</html>"),
+///     expires: 1234567890,
+/// };
+/// assert_eq!(response.status_line, "HTTP/1.1 200 OK");
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CachedResponse {
     pub status_line: String,
@@ -21,6 +54,7 @@ pub struct CachedResponse {
     pub expires: u64,
 }
 
+/// Thread-safe LRU cache for HTTP responses
 #[derive(Clone)]
 pub struct ProxyCache {
     cache: Arc<Mutex<LruCache<u64, CachedResponse>>>,
@@ -28,11 +62,20 @@ pub struct ProxyCache {
 }
 
 impl ProxyCache {
-    /// Creates a new ProxyCache with the default cache size.
+    /// Creates a new `ProxyCache` with the default cache size.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rustysquid::ProxyCache;
+    ///
+    /// let cache = ProxyCache::new();
+    /// assert_eq!(cache.total_size(), 0);
+    /// ```
     ///
     /// # Panics
     ///
-    /// Panics if CACHE_SIZE is 0, which should never happen in normal operation.
+    /// Panics if `CACHE_SIZE` is 0, which should never happen in normal operation.
     pub fn new() -> Self {
         Self {
             cache: Arc::new(Mutex::new(LruCache::new(
@@ -42,11 +85,24 @@ impl ProxyCache {
         }
     }
 
+    /// Check if the cache is empty
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # tokio_test::block_on(async {
+    /// use rustysquid::ProxyCache;
+    ///
+    /// let cache = ProxyCache::new();
+    /// assert!(cache.is_empty().await);
+    /// # })
+    /// ```
     pub async fn is_empty(&self) -> bool {
         let cache = self.cache.lock().await;
         cache.is_empty()
     }
 
+    /// Get a cached response by key, returns None if not found or expired
     pub async fn get(&self, key: u64) -> Option<CachedResponse> {
         let mut cache = self.cache.lock().await;
         let now = SystemTime::now()
@@ -67,16 +123,22 @@ impl ProxyCache {
         None
     }
 
+    /// Store a response in the cache, returns false if rejected (too large, memory pressure, etc)
     pub async fn put(&self, key: u64, response: CachedResponse) -> bool {
+        // Check memory pressure
+        if !memory::has_sufficient_memory() {
+            return false;
+        }
+
         let entry_size = Self::calculate_entry_size(&response);
-        
+
         // Reject entries that are too large
         if entry_size > MAX_ENTRY_SIZE {
             return false;
         }
 
         let mut cache = self.cache.lock().await;
-        
+
         // Check if we need to evict entries to make room
         let mut current_size = self.total_size.load(Ordering::Relaxed);
         while current_size + entry_size > MAX_CACHE_BYTES && !cache.is_empty() {
@@ -89,13 +151,13 @@ impl ProxyCache {
                 break;
             }
         }
-        
+
         // Remove old entry if it exists
         if let Some(old) = cache.get(&key) {
             let old_size = Self::calculate_entry_size(old);
             self.total_size.fetch_sub(old_size, Ordering::Relaxed);
         }
-        
+
         // Add new entry
         cache.put(key, response);
         self.total_size.fetch_add(entry_size, Ordering::Relaxed);
@@ -108,20 +170,56 @@ impl ProxyCache {
         self.total_size.store(0, Ordering::Relaxed);
     }
 
+    /// Get the number of entries in the cache
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # tokio_test::block_on(async {
+    /// use rustysquid::{ProxyCache, CachedResponse};
+    /// use bytes::Bytes;
+    ///
+    /// let cache = ProxyCache::new();
+    /// assert_eq!(cache.len().await, 0);
+    ///
+    /// let response = CachedResponse {
+    ///     status_line: "HTTP/1.1 200 OK".to_string(),
+    ///     headers: vec![],
+    ///     body: Bytes::from("test"),
+    ///     expires: u64::MAX,
+    /// };
+    /// cache.put(12345, response).await;
+    /// assert_eq!(cache.len().await, 1);
+    /// # })
+    /// ```
     pub async fn len(&self) -> usize {
         let cache = self.cache.lock().await;
         cache.len()
     }
-    
-    pub async fn total_size(&self) -> usize {
+
+    /// Get the total size of all cached entries in bytes
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use rustysquid::ProxyCache;
+    ///
+    /// let cache = ProxyCache::new();
+    /// assert_eq!(cache.total_size(), 0);
+    /// ```
+    pub fn total_size(&self) -> usize {
         self.total_size.load(Ordering::Relaxed)
     }
-    
+
     fn calculate_entry_size(entry: &CachedResponse) -> usize {
-        entry.status_line.len() +
-        entry.headers.iter().map(|h| h.len()).sum::<usize>() +
-        entry.body.len() +
-        std::mem::size_of::<u64>() // expires field
+        entry.status_line.len()
+            + entry
+                .headers
+                .iter()
+                .map(std::string::String::len)
+                .sum::<usize>()
+            + entry.body.len()
+            + std::mem::size_of::<u64>() // expires field
     }
 }
 
@@ -131,6 +229,21 @@ impl Default for ProxyCache {
     }
 }
 
+/// Parse an HTTP request, returns (method, path, headers) or None if invalid
+///
+/// # Examples
+///
+/// ```
+/// use rustysquid::parse_request;
+///
+/// let request = b"GET /index.html HTTP/1.1\r\nHost: example.com\r\n\r\n";
+/// let result = parse_request(request);
+/// assert!(result.is_some());
+/// let (method, path, headers) = result.unwrap();
+/// assert_eq!(method, "GET");
+/// assert_eq!(path, "/index.html");
+/// assert_eq!(headers[0], "Host: example.com");
+/// ```
 pub fn parse_request(data: &[u8]) -> Option<(String, String, Vec<String>)> {
     let mut headers = [httparse::EMPTY_HEADER; 64];
     let mut req = httparse::Request::new(&mut headers);
@@ -150,6 +263,22 @@ pub fn parse_request(data: &[u8]) -> Option<(String, String, Vec<String>)> {
     }
 }
 
+/// Extract host and port from HTTP headers
+///
+/// # Examples
+///
+/// ```
+/// use rustysquid::extract_host;
+///
+/// let headers = vec!["Host: example.com:8080".to_string()];
+/// assert_eq!(extract_host(&headers), Some(("example.com".to_string(), 8080)));
+///
+/// let headers = vec!["Host: example.com".to_string()];
+/// assert_eq!(extract_host(&headers), Some(("example.com".to_string(), 80)));
+///
+/// let headers = vec!["Content-Type: text/html".to_string()];
+/// assert_eq!(extract_host(&headers), None);
+/// ```
 pub fn extract_host(headers: &[String]) -> Option<(String, u16)> {
     for header in headers {
         if header.to_lowercase().starts_with("host:") {
@@ -165,6 +294,27 @@ pub fn extract_host(headers: &[String]) -> Option<(String, u16)> {
     None
 }
 
+/// Determine if a response should be cached based on method, path, and headers
+///
+/// # Examples
+///
+/// ```
+/// use rustysquid::is_cacheable;
+///
+/// // GET requests are cacheable by default
+/// assert!(is_cacheable("GET", "/index.html", &[]));
+///
+/// // POST requests are never cached
+/// assert!(!is_cacheable("POST", "/api", &[]));
+///
+/// // Respect Cache-Control headers
+/// let headers = vec!["Cache-Control: no-cache".to_string()];
+/// assert!(!is_cacheable("GET", "/index.html", &headers));
+///
+/// // Private responses are not cached
+/// let headers = vec!["Cache-Control: private".to_string()];
+/// assert!(!is_cacheable("GET", "/user", &headers));
+/// ```
 pub fn is_cacheable(method: &str, path: &str, response_headers: &[String]) -> bool {
     if method != "GET" {
         return false;
@@ -186,15 +336,17 @@ pub fn is_cacheable(method: &str, path: &str, response_headers: &[String]) -> bo
     // Check for static content extensions
     let cacheable_extensions = [
         ".jpg", ".jpeg", ".png", ".gif", ".ico", ".css", ".js", ".woff", ".woff2", ".ttf", ".svg",
-        ".webp", ".mp4", ".webm",
+        ".webp", ".mp4", ".webm", ".html", ".htm", ".xml", ".json", ".txt",
     ];
 
     let path_lower = path.to_lowercase();
-    cacheable_extensions
+    // Cache if it has a cacheable extension or is the root path
+    path == "/" || cacheable_extensions
         .iter()
         .any(|ext| path_lower.ends_with(ext))
 }
 
+/// Calculate TTL from Cache-Control headers, defaults to `CACHE_TTL`
 pub fn calculate_ttl(headers: &[String]) -> u64 {
     for header in headers {
         let header_lower = header.to_lowercase();
@@ -215,6 +367,7 @@ pub fn calculate_ttl(headers: &[String]) -> u64 {
     CACHE_TTL
 }
 
+/// Create a cache key from request parameters
 pub fn create_cache_key(host: &str, port: u16, path: &str) -> u64 {
     xxh64(format!("{host}:{port}{path}").as_bytes(), 0)
 }
@@ -320,7 +473,7 @@ mod tests {
     #[tokio::test]
     async fn test_cache_size_limit() {
         let cache = ProxyCache::new();
-        
+
         // Create a large response (1MB)
         let large_response = CachedResponse {
             status_line: "HTTP/1.1 200 OK\r\n".to_string(),
@@ -332,24 +485,24 @@ mod tests {
                 .as_secs()
                 + 3600,
         };
-        
+
         // Add entries until we exceed the limit
         for i in 0..60 {
-            let key = create_cache_key("test.com", 80, &format!("/page{}", i));
+            let key = create_cache_key("test.com", 80, &format!("/page{i}"));
             cache.put(key, large_response.clone()).await;
         }
-        
+
         // Total size should not exceed MAX_CACHE_BYTES
-        assert!(cache.total_size().await <= MAX_CACHE_BYTES);
-        
+        assert!(cache.total_size() <= MAX_CACHE_BYTES);
+
         // Cache should have evicted some entries
         assert!(cache.len().await < 60);
     }
-    
+
     #[tokio::test]
     async fn test_entry_size_limit() {
         let cache = ProxyCache::new();
-        
+
         // Create an oversized response (> MAX_ENTRY_SIZE)
         let oversized = CachedResponse {
             status_line: "HTTP/1.1 200 OK\r\n".to_string(),
@@ -361,14 +514,14 @@ mod tests {
                 .as_secs()
                 + 3600,
         };
-        
+
         let key = create_cache_key("test.com", 80, "/large");
         let result = cache.put(key, oversized).await;
-        
+
         // Should reject oversized entry
         assert!(!result);
         assert_eq!(cache.len().await, 0);
-        assert_eq!(cache.total_size().await, 0);
+        assert_eq!(cache.total_size(), 0);
     }
 
     #[tokio::test]

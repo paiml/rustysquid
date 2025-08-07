@@ -1,18 +1,30 @@
 [package]
 name = "rustysquid"
-version = "0.1.0"
+version = "1.0.1"
 edition = "2021"
-authors = ["Noah"]
-description = "Minimal Squid-inspired HTTP caching proxy with safety features for embedded systems"
+authors = ["Noah <noah@paiml.com>"]
+description = "High-performance HTTP caching proxy optimized for embedded systems and routers"
 license = "MIT"
 repository = "https://github.com/paiml/rustysquid"
+homepage = "https://github.com/paiml/rustysquid"
+documentation = "https://docs.rs/rustysquid"
 readme = "README.md"
-keywords = ["cache", "proxy", "http", "router"]
-categories = ["network-programming", "caching"]
+keywords = ["cache", "proxy", "http", "router", "embedded"]
+categories = ["network-programming", "caching", "web-programming::http-server"]
+exclude = [
+    "tests/*",
+    "benches/*",
+    "examples/*",
+    ".github/*",
+    "scripts/*",
+    "docs/*",
+    "Makefile*",
+    ".*",
+]
 
 [dependencies]
 # Minimal async runtime - single-threaded for low memory usage
-tokio = { version = "1.41", features = ["rt", "net", "io-util", "time", "macros", "sync"] }
+tokio = { version = "1.41", features = ["rt", "net", "io-util", "time", "macros", "sync", "signal"] }
 # Lightweight HTTP parsing
 httparse = "1.9"
 # Fast hashing for cache
@@ -28,6 +40,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [dev-dependencies]
 # Property-based testing
 proptest = "1.5"
+quickcheck = "1.0"
+quickcheck_macros = "1.0"
+arbitrary = { version = "1.3", features = ["derive"] }
 # Async test runtime
 tokio-test = "0.4"
 # Benchmarking
