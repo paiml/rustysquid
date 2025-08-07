@@ -324,7 +324,9 @@ pub fn is_cacheable(method: &str, path: &str, response_headers: &[String]) -> bo
     for header in response_headers {
         let header_lower = header.to_lowercase();
         if header_lower.starts_with("cache-control:") {
-            if header_lower.contains("no-cache") || header_lower.contains("no-store") {
+            if header_lower.contains("no-cache") 
+                || header_lower.contains("no-store") 
+                || header_lower.contains("private") {
                 return false;
             }
             if header_lower.contains("max-age=") {
