@@ -196,7 +196,7 @@ async fn handle_client(
     };
     
     // Step 2: Parse and validate request
-    let (method, full_path, _headers) = match validate_request(&buffer) {
+    let (method, full_path, headers) = match validate_request(&buffer) {
         Ok(result) => result,
         Err(e) => {
             debug!("Invalid request: {}", e);
