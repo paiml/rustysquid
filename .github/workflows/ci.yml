@@ -1,0 +1,138 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: Test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        rust: [stable, beta]
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ matrix.rust }}
+        components: rustfmt, clippy
+    
+    - name: Cache cargo
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+    
+    - name: Check formatting
+      run: cargo fmt -- --check
+    
+    - name: Clippy
+      run: cargo clippy -- -D warnings
+    
+    - name: Build
+      run: cargo build --verbose
+    
+    - name: Run tests
+      run: cargo test --verbose
+    
+    - name: Run property tests
+      run: cargo test --test property_tests
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+    
+    - name: Install tarpaulin
+      run: cargo install cargo-tarpaulin
+    
+    - name: Generate coverage
+      run: cargo tarpaulin --out Xml --all-features --workspace
+    
+    - name: Upload coverage
+      uses: codecov/codecov-action@v3
+      with:
+        files: ./cobertura.xml
+
+  security:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+    
+    - name: Install cargo-audit
+      run: cargo install cargo-audit
+    
+    - name: Security audit
+      run: cargo audit
+
+  binary-size:
+    name: Binary Size Check
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: x86_64-unknown-linux-musl
+    
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y musl-tools
+    
+    - name: Build release
+      run: cargo build --release --target x86_64-unknown-linux-musl
+    
+    - name: Check binary size
+      run: |
+        SIZE=$(stat -c%s target/x86_64-unknown-linux-musl/release/rustysquid)
+        echo "Binary size: $SIZE bytes"
+        if [ $SIZE -gt 524288 ]; then
+          echo "Binary size exceeds 512KB limit!"
+          exit 1
+        fi
+
+  cross-compile:
+    name: Cross Compile ARM64
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: aarch64-unknown-linux-musl
+    
+    - name: Install cross
+      run: cargo install cross
+    
+    - name: Build ARM64
+      run: cross build --release --target aarch64-unknown-linux-musl
+    
+    - name: Upload ARM64 binary
+      uses: actions/upload-artifact@v3
+      with:
+        name: rustysquid-aarch64
+        path: target/aarch64-unknown-linux-musl/release/rustysquid

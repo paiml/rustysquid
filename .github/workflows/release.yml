@@ -1,0 +1,138 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  create-release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Create Release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.ref }}
+        release_name: Release ${{ github.ref }}
+        draft: false
+        prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
+
+  build-binaries:
+    name: Build ${{ matrix.target }}
+    needs: create-release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            artifact: rustysquid-x86_64-linux
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            artifact: rustysquid-aarch64-linux
+          - os: ubuntu-latest
+            target: armv7-unknown-linux-musleabihf
+            artifact: rustysquid-armv7-linux
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact: rustysquid-x86_64-macos
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: rustysquid-aarch64-macos
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: rustysquid-x86_64-windows.exe
+
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: ${{ matrix.target }}
+    
+    - name: Install cross (Linux ARM builds)
+      if: runner.os == 'Linux' && matrix.target != 'x86_64-unknown-linux-musl'
+      run: cargo install cross
+    
+    - name: Install musl tools (Linux x64)
+      if: runner.os == 'Linux' && matrix.target == 'x86_64-unknown-linux-musl'
+      run: sudo apt-get update && sudo apt-get install -y musl-tools
+    
+    - name: Build with cross
+      if: runner.os == 'Linux' && matrix.target != 'x86_64-unknown-linux-musl'
+      run: cross build --release --target ${{ matrix.target }}
+    
+    - name: Build with cargo
+      if: runner.os != 'Linux' || matrix.target == 'x86_64-unknown-linux-musl'
+      run: cargo build --release --target ${{ matrix.target }}
+    
+    - name: Strip binary (Linux/macOS)
+      if: runner.os != 'Windows'
+      run: |
+        if [[ "${{ runner.os }}" == "Linux" ]]; then
+          strip target/${{ matrix.target }}/release/rustysquid
+        elif [[ "${{ runner.os }}" == "macOS" ]]; then
+          strip target/${{ matrix.target }}/release/rustysquid
+        fi
+    
+    - name: Create archive
+      run: |
+        cd target/${{ matrix.target }}/release
+        if [[ "${{ runner.os }}" == "Windows" ]]; then
+          7z a ../../../${{ matrix.artifact }}.zip rustysquid.exe
+        else
+          tar czf ../../../${{ matrix.artifact }}.tar.gz rustysquid
+        fi
+        cd ../../../
+    
+    - name: Generate checksums
+      run: |
+        if [[ "${{ runner.os }}" == "Windows" ]]; then
+          certutil -hashfile ${{ matrix.artifact }}.zip SHA256 > ${{ matrix.artifact }}.zip.sha256
+        else
+          shasum -a 256 ${{ matrix.artifact }}.tar.gz > ${{ matrix.artifact }}.tar.gz.sha256
+        fi
+    
+    - name: Upload binary
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }}
+        asset_path: ./${{ matrix.artifact }}${{ runner.os == 'Windows' && '.zip' || '.tar.gz' }}
+        asset_name: ${{ matrix.artifact }}${{ runner.os == 'Windows' && '.zip' || '.tar.gz' }}
+        asset_content_type: ${{ runner.os == 'Windows' && 'application/zip' || 'application/gzip' }}
+    
+    - name: Upload checksum
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ needs.create-release.outputs.upload_url }}
+        asset_path: ./${{ matrix.artifact }}${{ runner.os == 'Windows' && '.zip.sha256' || '.tar.gz.sha256' }}
+        asset_name: ${{ matrix.artifact }}${{ runner.os == 'Windows' && '.zip.sha256' || '.tar.gz.sha256' }}
+        asset_content_type: text/plain
+
+  publish-crate:
+    name: Publish to crates.io
+    needs: build-binaries
+    runs-on: ubuntu-latest
+    if: "!contains(github.ref, 'alpha') && !contains(github.ref, 'beta') && !contains(github.ref, 'rc')"
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+    
+    - name: Publish to crates.io
+      run: cargo publish --token ${{ secrets.CRATES_TOKEN }}
+      continue-on-error: true # Allow failure if version already published
