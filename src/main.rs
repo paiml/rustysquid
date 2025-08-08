@@ -9,9 +9,9 @@ use tracing::{debug, error, info, warn};
 
 // Import from lib
 use rustysquid::{
-    calculate_ttl, create_cache_key, extract_host, is_cacheable, parse_request, CachedResponse,
-    ProxyCache, CACHE_SIZE, MAX_CONNECTIONS, MAX_REQUEST_SIZE, MAX_RESPONSE_SIZE,
-    connection_pool::ConnectionPool,
+    calculate_ttl, connection_pool::ConnectionPool, create_cache_key, extract_host, is_cacheable,
+    parse_request, CachedResponse, ProxyCache, CACHE_SIZE, MAX_CONNECTIONS, MAX_REQUEST_SIZE,
+    MAX_RESPONSE_SIZE,
 };
 
 const PROXY_PORT: u16 = 3128;
@@ -39,7 +39,7 @@ async fn read_client_request(client: &mut TcpStream) -> Result<BytesMut, &'stati
             _ => return Err("Read timeout or error"),
         }
     }
-    
+
     Ok(buffer)
 }
 
@@ -62,24 +62,33 @@ async fn serve_cached_response(
     client: &mut TcpStream,
     cached: Arc<CachedResponse>,
 ) -> Result<(), &'static str> {
-    client.write_all(cached.status_line.as_bytes()).await
+    client
+        .write_all(cached.status_line.as_bytes())
+        .await
         .map_err(|_| "Failed to write status")?;
-    
+
     for header in &cached.headers {
-        client.write_all(header.as_bytes()).await
+        client
+            .write_all(header.as_bytes())
+            .await
             .map_err(|_| "Failed to write header")?;
-        client.write_all(b"\r\n").await
+        client
+            .write_all(b"\r\n")
+            .await
             .map_err(|_| "Failed to write CRLF")?;
     }
-    
-    client.write_all(b"\r\n").await
+
+    client
+        .write_all(b"\r\n")
+        .await
         .map_err(|_| "Failed to write final CRLF")?;
-    client.write_all(&cached.body).await
+    client
+        .write_all(&cached.body)
+        .await
         .map_err(|_| "Failed to write body")?;
-    
+
     Ok(())
 }
-
 
 /// Forward request to upstream and get response
 async fn forward_to_upstream(
@@ -87,17 +96,24 @@ async fn forward_to_upstream(
     request: &[u8],
 ) -> Result<BytesMut, &'static str> {
     let (mut upstream_read, mut upstream_write) = upstream.split();
-    
+
     // Send request
-    upstream_write.write_all(request).await
+    upstream_write
+        .write_all(request)
+        .await
         .map_err(|_| "Failed to forward request")?;
-    
+
     // Read response
     let mut response_buffer = BytesMut::with_capacity(8192);
     let mut total_size = 0;
-    
+
     loop {
-        match timeout(CONNECTION_TIMEOUT, upstream_read.read_buf(&mut response_buffer)).await {
+        match timeout(
+            CONNECTION_TIMEOUT,
+            upstream_read.read_buf(&mut response_buffer),
+        )
+        .await
+        {
             Ok(Ok(0)) => break,
             Ok(Ok(n)) => {
                 total_size += n;
@@ -108,16 +124,12 @@ async fn forward_to_upstream(
             _ => break,
         }
     }
-    
+
     Ok(response_buffer)
 }
 
 /// Parse response headers for caching decision
-fn parse_response_for_cache(
-    response: &[u8],
-    method: &str,
-    path: &str,
-) -> Option<CachedResponse> {
+fn parse_response_for_cache(response: &[u8], method: &str, path: &str) -> Option<CachedResponse> {
     let mut headers_end = 0;
     for i in 0..response.len().saturating_sub(3) {
         if &response[i..i + 4] == b"\r\n\r\n" {
@@ -125,41 +137,42 @@ fn parse_response_for_cache(
             break;
         }
     }
-    
+
     if headers_end == 0 {
         return None;
     }
-    
+
     let headers_bytes = &response[..headers_end];
     let body = &response[headers_end..];
-    
+
     // Parse status line and headers
     let headers_str = String::from_utf8_lossy(headers_bytes);
     let lines: Vec<String> = headers_str.lines().map(|s| s.to_string()).collect();
-    
+
     if lines.is_empty() {
         return None;
     }
-    
+
     let status_line = format!("{}\r\n", lines[0]);
     let headers = lines[1..]
         .iter()
         .filter(|h| !h.is_empty())
         .cloned()
         .collect::<Vec<_>>();
-    
+
     // Check if cacheable
     if !is_cacheable(method, path, &headers) {
         return None;
     }
-    
+
     // Calculate TTL
     let ttl = calculate_ttl(&headers);
     let expires = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs() + ttl;
-    
+        .as_secs()
+        + ttl;
+
     Some(CachedResponse {
         status_line,
         headers,
@@ -181,12 +194,16 @@ async fn handle_client(
         Err(e) => {
             warn!("Failed to read request: {}", e);
             if e == "Request too large" {
-                send_error_response(&mut client, b"HTTP/1.1 413 Request Entity Too Large\r\n\r\n").await;
+                send_error_response(
+                    &mut client,
+                    b"HTTP/1.1 413 Request Entity Too Large\r\n\r\n",
+                )
+                .await;
             }
             return;
         }
     };
-    
+
     // Step 2: Parse and validate request
     let (method, full_path, _headers) = match validate_request(&buffer) {
         Ok(result) => result,
@@ -196,7 +213,7 @@ async fn handle_client(
             return;
         }
     };
-    
+
     // Extract host and path from full_path
     let parts: Vec<&str> = full_path.splitn(2, '/').collect();
     let host_port = parts[0];
@@ -204,10 +221,10 @@ async fn handle_client(
     let host_parts: Vec<&str> = host_port.split(':').collect();
     let host = host_parts[0];
     let port: u16 = host_parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(80);
-    
+
     // Step 3: Check cache for GET requests
     let cache_key = create_cache_key(host, port, &path);
-    
+
     if method == "GET" {
         if let Some(cached) = cache.get(cache_key).await {
             info!("CACHE HIT: {}{}", host, path);
@@ -217,9 +234,9 @@ async fn handle_client(
             return;
         }
     }
-    
+
     debug!("CACHE MISS: {}{}", host, path);
-    
+
     // Step 4: Get connection from pool
     let mut upstream = match pool.get_connection(host, port).await {
         Ok(stream) => stream,
@@ -229,7 +246,7 @@ async fn handle_client(
             return;
         }
     };
-    
+
     // Step 5: Forward request and get response
     let response_buffer = match forward_to_upstream(&mut upstream, &buffer).await {
         Ok(resp) => resp,
@@ -239,23 +256,25 @@ async fn handle_client(
             return;
         }
     };
-    
+
     // Step 6: Send response to client
     if let Err(e) = client.write_all(&response_buffer).await {
         debug!("Failed to send response to client: {}", e);
         return;
     }
-    
+
     // Step 7: Return connection to pool
-    pool.return_connection(host.to_string(), port, upstream).await;
-    
+    pool.return_connection(host.to_string(), port, upstream)
+        .await;
+
     // Step 8: Cache response if applicable
     if let Some(cached_response) = parse_response_for_cache(&response_buffer, &method, &path) {
-        let ttl = cached_response.expires - SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        
+        let ttl = cached_response.expires
+            - SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+
         if cache.put(cache_key, cached_response).await {
             info!("CACHED: {}{} (TTL: {}s)", host, path, ttl);
         }
@@ -265,7 +284,7 @@ async fn handle_client(
 /// Connection acceptor with proper connection limiting
 async fn accept_connections(listener: TcpListener, cache: ProxyCache, pool: ConnectionPool) {
     let active_connections = Arc::new(AtomicUsize::new(0));
-    
+
     loop {
         let (stream, addr) = match listener.accept().await {
             Ok(conn) => conn,
@@ -274,21 +293,21 @@ async fn accept_connections(listener: TcpListener, cache: ProxyCache, pool: Conn
                 continue;
             }
         };
-        
+
         // Check connection limit
         if active_connections.load(Ordering::Relaxed) >= MAX_CONNECTIONS {
             debug!("Connection limit reached, rejecting {}", addr);
             drop(stream);
             continue;
         }
-        
+
         // Handle client
         let cache_clone = cache.clone();
         let pool_clone = pool.clone();
         let connections = Arc::clone(&active_connections);
-        
+
         connections.fetch_add(1, Ordering::Relaxed);
-        
+
         tokio::spawn(async move {
             handle_client(stream, cache_clone, pool_clone, connections.clone()).await;
             connections.fetch_sub(1, Ordering::Relaxed);

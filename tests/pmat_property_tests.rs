@@ -1,8 +1,8 @@
 use bytes::Bytes;
 use proptest::prelude::*;
 use quickcheck_macros::quickcheck;
-use rustysquid::*;
 use rustysquid::connection_pool::ConnectionPool;
+use rustysquid::*;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -55,7 +55,7 @@ proptest! {
             let key = create_cache_key(&hosts[i], ports[i % ports.len()], &paths[i % paths.len()]);
             keys.push(key);
         }
-        
+
         // Check for reasonable distribution (no extreme clustering)
         keys.sort_unstable();
         keys.dedup();
@@ -78,7 +78,7 @@ proptest! {
     ) {
         let request = format!("{} {} HTTP/1.1\r\nHost: {}\r\n\r\n", method, path, host);
         let result = parse_request(request.as_bytes());
-        
+
         prop_assert!(result.is_some(), "Valid request must parse");
         let (parsed_method, parsed_path, headers) = result.unwrap();
         prop_assert_eq!(parsed_method, method);
@@ -94,7 +94,7 @@ proptest! {
         // Filter out accidentally valid requests
         let request_str = String::from_utf8_lossy(&garbage);
         prop_assume!(!request_str.starts_with("GET ") && !request_str.starts_with("POST "));
-        
+
         let result = parse_request(&garbage);
         prop_assert!(result.is_none(), "Malformed request must be rejected");
     }
@@ -106,7 +106,7 @@ proptest! {
     ) {
         let large_path = "/".repeat(size);
         let request = format!("GET {} HTTP/1.1\r\nHost: example.com\r\n\r\n", large_path);
-        
+
         // This should be rejected at the parsing level or before
         prop_assert!(request.len() > MAX_REQUEST_SIZE);
     }
@@ -134,10 +134,10 @@ proptest! {
         directive in prop::sample::select(vec!["no-cache", "no-store", "private", "max-age=3600", "public"])
     ) {
         let headers = vec![format!("Cache-Control: {}", directive)];
-        let should_cache = !directive.contains("no-cache") && 
-                          !directive.contains("no-store") && 
+        let should_cache = !directive.contains("no-cache") &&
+                          !directive.contains("no-store") &&
                           !directive.contains("private");
-        
+
         let result = is_cacheable("GET", "/index.html", &headers);
         prop_assert_eq!(result, should_cache, "Cache-Control directives must be respected");
     }
@@ -146,7 +146,7 @@ proptest! {
     #[test]
     fn prop_static_files_cacheable(
         extension in prop::sample::select(vec![
-            "jpg", "jpeg", "png", "gif", "ico", "css", "js", 
+            "jpg", "jpeg", "png", "gif", "ico", "css", "js",
             "woff", "woff2", "ttf", "svg", "webp", "mp4", "webm"
         ])
     ) {
@@ -178,7 +178,7 @@ proptest! {
         let filtered: Vec<String> = headers.into_iter()
             .filter(|h| !h.to_lowercase().starts_with("cache-control"))
             .collect();
-        
+
         let ttl = calculate_ttl(&filtered);
         prop_assert_eq!(ttl, CACHE_TTL, "Default TTL should be applied");
     }
@@ -191,7 +191,7 @@ proptest! {
 #[tokio::test]
 async fn prop_cache_capacity_invariant() {
     let cache = ProxyCache::new();
-    
+
     // Add more items than capacity
     for i in 0..(CACHE_SIZE + 100) {
         let response = CachedResponse {
@@ -202,19 +202,22 @@ async fn prop_cache_capacity_invariant() {
         };
         cache.put(i as u64, response).await;
     }
-    
+
     // Property: Cache never exceeds maximum capacity
-    assert!(cache.len().await <= CACHE_SIZE, "Cache capacity must not be exceeded");
+    assert!(
+        cache.len().await <= CACHE_SIZE,
+        "Cache capacity must not be exceeded"
+    );
 }
 
 #[tokio::test]
 async fn prop_cache_memory_invariant() {
     let cache = ProxyCache::new();
-    
+
     // Try to add entries that would exceed memory limit
     let large_size = MAX_ENTRY_SIZE - 1000; // Just under the per-entry limit
     let num_entries = (MAX_CACHE_BYTES / large_size) + 10; // Would exceed total limit
-    
+
     for i in 0..num_entries {
         let response = CachedResponse {
             status_line: "HTTP/1.1 200 OK\r\n".to_string(),
@@ -224,7 +227,7 @@ async fn prop_cache_memory_invariant() {
         };
         cache.put(i as u64, response).await;
     }
-    
+
     // Property: Total cache size never exceeds memory limit
     assert!(
         cache.total_size() <= MAX_CACHE_BYTES,
@@ -237,7 +240,7 @@ async fn prop_cache_memory_invariant() {
 #[tokio::test]
 async fn prop_cache_expiration_invariant() {
     let cache = ProxyCache::new();
-    
+
     // Add an expired entry
     let expired_response = CachedResponse {
         status_line: "HTTP/1.1 200 OK\r\n".to_string(),
@@ -245,13 +248,13 @@ async fn prop_cache_expiration_invariant() {
         body: Bytes::from("expired"),
         expires: 0, // Already expired
     };
-    
+
     cache.put(1, expired_response).await;
-    
+
     // Property: Expired entries are never returned
     let result = cache.get(1).await;
     assert!(result.is_none(), "Expired entries must not be returned");
-    
+
     // Add a valid entry
     let valid_response = CachedResponse {
         status_line: "HTTP/1.1 200 OK\r\n".to_string(),
@@ -260,15 +263,19 @@ async fn prop_cache_expiration_invariant() {
         expires: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
-            .as_secs() + 3600,
+            .as_secs()
+            + 3600,
     };
-    
+
     cache.put(2, valid_response.clone()).await;
-    
+
     // Property: Valid entries are returned
     let result = cache.get(2).await;
     if let Some(result_arc) = result {
-        assert_eq!(*result_arc, valid_response, "Valid entries must be returned");
+        assert_eq!(
+            *result_arc, valid_response,
+            "Valid entries must be returned"
+        );
     } else {
         panic!("Expected valid entry but got None");
     }
@@ -282,10 +289,10 @@ async fn prop_cache_expiration_invariant() {
 async fn prop_concurrent_cache_safety() {
     use std::sync::Arc;
     use tokio::task;
-    
+
     let cache = Arc::new(ProxyCache::new());
     let mut handles = vec![];
-    
+
     // Spawn many concurrent operations
     for i in 0..100 {
         let cache_clone = cache.clone();
@@ -297,26 +304,29 @@ async fn prop_concurrent_cache_safety() {
                 body: Bytes::from(format!("body{}", i)),
                 expires: u64::MAX,
             };
-            
+
             // Concurrent put and get operations
             cache_clone.put(key, response.clone()).await;
             let retrieved = cache_clone.get(key).await;
-            
+
             // Property: Concurrent operations maintain consistency
             if let Some(retrieved_arc) = retrieved {
-                assert_eq!(*retrieved_arc, response, "Concurrent operations must be consistent");
+                assert_eq!(
+                    *retrieved_arc, response,
+                    "Concurrent operations must be consistent"
+                );
             } else {
                 panic!("Expected cached response but got None");
             }
         });
         handles.push(handle);
     }
-    
+
     // Wait for all tasks
     for handle in handles {
         handle.await.unwrap();
     }
-    
+
     // Property: Cache remains consistent after concurrent access
     assert!(cache.len().await > 0, "Cache should contain entries");
     assert!(cache.total_size() > 0, "Cache should track size");
@@ -357,7 +367,7 @@ proptest! {
         let filtered: Vec<String> = headers.into_iter()
             .filter(|h| !h.to_lowercase().starts_with("host:"))
             .collect();
-        
+
         let result = extract_host(&filtered);
         prop_assert_eq!(result, None, "Missing host header must return None");
     }
@@ -397,7 +407,7 @@ fn qc_cacheable_deterministic(method: String, path: String, headers: Vec<String>
 #[tokio::test]
 async fn prop_zero_copy_cache_operations() {
     let cache = ProxyCache::new();
-    
+
     // Create a response
     let response = CachedResponse {
         status_line: "HTTP/1.1 200 OK\r\n".to_string(),
@@ -406,24 +416,28 @@ async fn prop_zero_copy_cache_operations() {
         expires: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
-            .as_secs() + 3600,
+            .as_secs()
+            + 3600,
     };
-    
+
     let key = 12345u64;
-    
+
     // Put response in cache
     cache.put(key, response.clone()).await;
-    
+
     // Get multiple references to the same cached entry
     let cached1 = cache.get(key).await.unwrap();
     let cached2 = cache.get(key).await.unwrap();
-    
+
     // Property: Multiple gets return Arc clones, not data clones
     assert_eq!(Arc::strong_count(&cached1), Arc::strong_count(&cached2));
-    
+
     // Property: Arc contents are identical (same memory)
-    assert!(Arc::ptr_eq(&cached1, &cached2), "Arc should point to same memory location");
-    
+    assert!(
+        Arc::ptr_eq(&cached1, &cached2),
+        "Arc should point to same memory location"
+    );
+
     // Property: Data is accessible through Arc
     assert_eq!(cached1.status_line, response.status_line);
     assert_eq!(cached1.headers, response.headers);
@@ -431,10 +445,10 @@ async fn prop_zero_copy_cache_operations() {
     assert_eq!(cached1.expires, response.expires);
 }
 
-#[tokio::test] 
+#[tokio::test]
 async fn prop_arc_reference_count_behavior() {
     let cache = ProxyCache::new();
-    
+
     let response = CachedResponse {
         status_line: "HTTP/1.1 200 OK\r\n".to_string(),
         headers: vec!["Content-Type: application/json".to_string()],
@@ -442,55 +456,62 @@ async fn prop_arc_reference_count_behavior() {
         expires: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
-            .as_secs() + 3600,
+            .as_secs()
+            + 3600,
     };
-    
+
     let key = 54321u64;
     cache.put(key, response).await;
-    
+
     // Get reference and check initial count
     let cached_ref1 = cache.get(key).await.unwrap();
     let initial_count = Arc::strong_count(&cached_ref1);
-    
+
     // Get multiple additional references
     let cached_ref2 = cache.get(key).await.unwrap();
     let cached_ref3 = cache.get(key).await.unwrap();
-    
+
     // Property: Reference count increases with each Arc clone
     let count_after_clones = Arc::strong_count(&cached_ref1);
-    assert!(count_after_clones >= initial_count, "Reference count should increase with clones");
-    
+    assert!(
+        count_after_clones >= initial_count,
+        "Reference count should increase with clones"
+    );
+
     // Drop references and check count decreases
     drop(cached_ref2);
     drop(cached_ref3);
-    
+
     let count_after_drops = Arc::strong_count(&cached_ref1);
-    assert!(count_after_drops < count_after_clones, "Reference count should decrease when references are dropped");
+    assert!(
+        count_after_drops < count_after_clones,
+        "Reference count should decrease when references are dropped"
+    );
 }
 
 #[tokio::test]
 async fn prop_zero_allocations_in_cache_hit_path() {
     use std::alloc::{GlobalAlloc, Layout, System};
     use std::sync::atomic::{AtomicUsize, Ordering};
-    
+
     // Custom allocator to track allocations
     struct TrackingAllocator {
         allocations: AtomicUsize,
     }
-    
+
     unsafe impl GlobalAlloc for TrackingAllocator {
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
             self.allocations.fetch_add(1, Ordering::Relaxed);
             System.alloc(layout)
         }
-        
+
         unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
             System.dealloc(ptr, layout)
         }
     }
-    
+
     let cache = ProxyCache::new();
-    
+
     let response = CachedResponse {
         status_line: "HTTP/1.1 200 OK\r\n".to_string(),
         headers: vec!["Content-Type: text/plain".to_string()],
@@ -498,25 +519,29 @@ async fn prop_zero_allocations_in_cache_hit_path() {
         expires: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
-            .as_secs() + 3600,
+            .as_secs()
+            + 3600,
     };
-    
+
     let key = 98765u64;
-    
+
     // Put response in cache (this will allocate)
     cache.put(key, response).await;
-    
+
     // Warm up - first get might have some setup allocations
     let _warmup = cache.get(key).await;
-    
+
     // Property: Subsequent cache hits should not require new allocations
     // Note: This is a behavioral property test - the actual zero-allocation
     // property is achieved by using Arc::clone instead of data cloning
     let cached1 = cache.get(key).await.unwrap();
     let cached2 = cache.get(key).await.unwrap();
-    
+
     // Verify they're the same Arc (no data copying)
-    assert!(Arc::ptr_eq(&cached1, &cached2), "Cache hits should return same Arc instance");
+    assert!(
+        Arc::ptr_eq(&cached1, &cached2),
+        "Cache hits should return same Arc instance"
+    );
 }
 
 // ----------------------------------------------------------------------------
@@ -528,12 +553,12 @@ fn qc_connection_pool_stats_deterministic(host: String, port: u16) -> bool {
     if host.is_empty() || host.len() > 253 {
         return true; // Skip invalid hosts
     }
-    
+
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
-        
+
     rt.block_on(async {
         let pool = ConnectionPool::new();
         let stats1 = pool.stats().await;
@@ -547,24 +572,24 @@ fn qc_connection_pool_cleanup_idempotent(iterations: u8) -> bool {
     if iterations == 0 {
         return true;
     }
-    
+
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap();
-        
+
     rt.block_on(async {
         let pool = ConnectionPool::new();
-        
+
         // Multiple cleanups should be safe
         for _ in 0..iterations.min(10) {
             pool.cleanup_stale_connections().await;
         }
-        
+
         let stats1 = pool.stats().await;
         pool.cleanup_stale_connections().await;
         let stats2 = pool.stats().await;
-        
+
         stats1 == stats2
     })
 }
@@ -572,50 +597,56 @@ fn qc_connection_pool_cleanup_idempotent(iterations: u8) -> bool {
 #[tokio::test]
 async fn prop_connection_pool_capacity_limits() {
     let pool = ConnectionPool::new();
-    
+
     // Property: Pool enforces capacity limits per host
     // Since we can't make real connections in tests, we verify the pool structure remains consistent
     let initial_stats = pool.stats().await;
     assert!(initial_stats.is_empty(), "Pool should start empty");
-    
+
     // Cleanup should be safe even on empty pool
     pool.cleanup_stale_connections().await;
     let post_cleanup_stats = pool.stats().await;
-    assert_eq!(initial_stats, post_cleanup_stats, "Cleanup on empty pool should be no-op");
+    assert_eq!(
+        initial_stats, post_cleanup_stats,
+        "Cleanup on empty pool should be no-op"
+    );
 }
 
 #[tokio::test]
 async fn prop_connection_pool_thread_safety() {
     use tokio::task;
-    
+
     let pool = Arc::new(ConnectionPool::new());
     let mut handles = vec![];
-    
+
     // Property: Concurrent pool operations are thread-safe
     for i in 0..50 {
         let pool_clone = pool.clone();
         let handle = task::spawn(async move {
             let _host = format!("host{}.com", i);
-            
+
             // Concurrent stats access should not panic
             let _stats = pool_clone.stats().await;
-            
+
             // Concurrent cleanup should not interfere
             pool_clone.cleanup_stale_connections().await;
-            
+
             // Multiple stats calls should remain consistent within a task
             let stats1 = pool_clone.stats().await;
             let stats2 = pool_clone.stats().await;
-            assert_eq!(stats1, stats2, "Concurrent stats access should be consistent");
+            assert_eq!(
+                stats1, stats2,
+                "Concurrent stats access should be consistent"
+            );
         });
         handles.push(handle);
     }
-    
+
     // Wait for all concurrent tasks
     for handle in handles {
         handle.await.unwrap();
     }
-    
+
     // Property: Pool remains in valid state after concurrent access
     let final_stats = pool.stats().await;
     assert!(final_stats.len() >= 0, "Pool should remain in valid state");
@@ -624,25 +655,28 @@ async fn prop_connection_pool_thread_safety() {
 #[tokio::test]
 async fn prop_connection_pool_resource_cleanup() {
     let pool = ConnectionPool::new();
-    
+
     // Property: Cleanup operations maintain pool integrity
     for _ in 0..10 {
         pool.cleanup_stale_connections().await;
         let stats = pool.stats().await;
-        
+
         // Pool should never contain negative or invalid counts
         for ((_host, _port), count) in stats.iter() {
             assert!(*count >= 0, "Connection counts must be non-negative");
         }
     }
-    
+
     // Property: Repeated cleanup calls are safe and idempotent
     let stats_before = pool.stats().await;
     pool.cleanup_stale_connections().await;
     pool.cleanup_stale_connections().await;
     let stats_after = pool.stats().await;
-    
-    assert_eq!(stats_before, stats_after, "Multiple cleanup calls should be idempotent");
+
+    assert_eq!(
+        stats_before, stats_after,
+        "Multiple cleanup calls should be idempotent"
+    );
 }
 
 // ----------------------------------------------------------------------------
@@ -652,21 +686,25 @@ async fn prop_connection_pool_resource_cleanup() {
 #[test]
 fn test_pmat_zero_tolerance_compliance() {
     // This test verifies that our code meets PMAT's zero tolerance standards
-    
+
     // Property: No SATD markers in code
     let src_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let has_satd = std::fs::read_dir(src_dir).unwrap()
+    let has_satd = std::fs::read_dir(src_dir)
+        .unwrap()
         .filter_map(|entry| entry.ok())
         .filter(|entry| entry.path().extension().map_or(false, |ext| ext == "rs"))
         .any(|entry| {
             let content = std::fs::read_to_string(entry.path()).unwrap();
             content.contains("TODO") || content.contains("FIXME") || content.contains("HACK")
         });
-    
-    assert!(!has_satd, "Code must not contain SATD markers (TODO/FIXME/HACK)");
-    
+
+    assert!(
+        !has_satd,
+        "Code must not contain SATD markers (TODO/FIXME/HACK)"
+    );
+
     // Property: All functions have reasonable complexity (verified by refactoring)
     // This is enforced at compile time via clippy settings
-    
+
     println!("✅ PMAT Zero Tolerance Standards Verified");
 }

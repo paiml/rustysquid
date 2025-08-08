@@ -37,7 +37,7 @@ impl ConnectionPool {
     /// Get a connection from the pool or create a new one
     pub async fn get_connection(&self, host: &str, port: u16) -> Result<TcpStream, &'static str> {
         let key = (host.to_string(), port);
-        
+
         // Try to get an existing connection
         {
             let mut pools = self.pools.lock().await;
@@ -56,7 +56,7 @@ impl ConnectionPool {
                 }
             }
         }
-        
+
         // No suitable connection found, create new one
         debug!("Creating new connection to {}:{}", host, port);
         timeout(CONNECTION_TIMEOUT, TcpStream::connect((host, port)))
@@ -69,9 +69,9 @@ impl ConnectionPool {
     pub async fn return_connection(&self, host: String, port: u16, stream: TcpStream) {
         let key = (host.clone(), port);
         let mut pools = self.pools.lock().await;
-        
+
         let pool = pools.entry(key).or_insert_with(Vec::new);
-        
+
         // Only keep up to MAX_CONNECTIONS_PER_HOST
         if pool.len() < MAX_CONNECTIONS_PER_HOST {
             debug!("Returning connection to pool for {}:{}", host, port);
@@ -96,7 +96,7 @@ impl ConnectionPool {
     pub async fn cleanup_stale_connections(&self) {
         let mut pools = self.pools.lock().await;
         let now = Instant::now();
-        
+
         for ((host, port), pool) in pools.iter_mut() {
             pool.retain(|conn| {
                 let is_fresh = now.duration_since(conn.last_used) < IDLE_TIMEOUT;
@@ -106,7 +106,7 @@ impl ConnectionPool {
                 is_fresh
             });
         }
-        
+
         // Remove empty pools
         pools.retain(|_, pool| !pool.is_empty());
     }
@@ -114,7 +114,10 @@ impl ConnectionPool {
     /// Get statistics about the connection pool
     pub async fn stats(&self) -> HashMap<HostKey, usize> {
         let pools = self.pools.lock().await;
-        pools.iter().map(|(key, pool)| (key.clone(), pool.len())).collect()
+        pools
+            .iter()
+            .map(|(key, pool)| (key.clone(), pool.len()))
+            .collect()
     }
 }
 
@@ -131,7 +134,7 @@ mod tests {
     #[tokio::test]
     async fn test_connection_pool_basic() {
         let pool = ConnectionPool::new();
-        
+
         // Stats should be empty initially
         let stats = pool.stats().await;
         assert!(stats.is_empty());
@@ -140,11 +143,12 @@ mod tests {
     #[tokio::test]
     async fn test_connection_pool_return() {
         let pool = ConnectionPool::new();
-        
+
         // Return a mock connection (will fail in real use but OK for testing pool logic)
         if let Ok(stream) = TcpStream::connect("127.0.0.1:1").await {
-            pool.return_connection("test.com".to_string(), 80, stream).await;
-            
+            pool.return_connection("test.com".to_string(), 80, stream)
+                .await;
+
             let stats = pool.stats().await;
             let key = ("test.com".to_string(), 80);
             assert_eq!(stats.get(&key), Some(&1));

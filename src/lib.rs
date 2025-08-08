@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 
-pub mod memory;
 pub mod connection_pool;
+pub mod memory;
 
 /// Maximum number of cache entries
 pub const CACHE_SIZE: usize = 10000;
@@ -325,9 +325,10 @@ pub fn is_cacheable(method: &str, path: &str, response_headers: &[String]) -> bo
     for header in response_headers {
         let header_lower = header.to_lowercase();
         if header_lower.starts_with("cache-control:") {
-            if header_lower.contains("no-cache") 
-                || header_lower.contains("no-store") 
-                || header_lower.contains("private") {
+            if header_lower.contains("no-cache")
+                || header_lower.contains("no-store")
+                || header_lower.contains("private")
+            {
                 return false;
             }
             if header_lower.contains("max-age=") {
@@ -344,9 +345,10 @@ pub fn is_cacheable(method: &str, path: &str, response_headers: &[String]) -> bo
 
     let path_lower = path.to_lowercase();
     // Cache if it has a cacheable extension or is the root path
-    path == "/" || cacheable_extensions
-        .iter()
-        .any(|ext| path_lower.ends_with(ext))
+    path == "/"
+        || cacheable_extensions
+            .iter()
+            .any(|ext| path_lower.ends_with(ext))
 }
 
 /// Calculate TTL from Cache-Control headers, defaults to `CACHE_TTL`
@@ -373,7 +375,7 @@ pub fn calculate_ttl(headers: &[String]) -> u64 {
 /// Create a cache key from request parameters without allocation
 pub fn create_cache_key(host: &str, port: u16, path: &str) -> u64 {
     use xxhash_rust::xxh64::Xxh64;
-    
+
     let mut hasher = Xxh64::new(0);
     hasher.update(host.as_bytes());
     hasher.update(b":");
