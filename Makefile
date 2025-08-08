@@ -65,17 +65,38 @@ build-debug: ## Build debug binary for testing
 	@cargo build --target aarch64-unknown-linux-musl
 
 # Deployment
-deploy: build ## Deploy to router
-	@echo "🚀 Deploying to router..."
-	@cat target/aarch64-unknown-linux-musl/release/rustysquid | \
-		ssh noah@192.168.50.1 "cat > /tmp/rustysquid && chmod +x /tmp/rustysquid"
-	@ssh noah@192.168.50.1 "killall rustysquid 2>/dev/null; sleep 1; \
-		nohup /tmp/rustysquid > /tmp/rustysquid.log 2>&1 & echo '✅ Deployed and started'"
+deploy: build ## Safe deployment with confirmation (Toyota Way)
+	@echo "🚀 Safe deployment with no surprises..."
+	@./deploy-safe.sh
+
+deploy-auto: build ## Automated deployment without confirmation
+	@echo "🤖 Automated deployment..."
+	@./deploy_to_router.sh
+
+deploy-quick: ## Quick deploy without building (use existing binary)
+	@echo "⚡ Quick deploy to router..."
+	@scp target/aarch64-unknown-linux-musl/release/rustysquid noah@192.168.50.1:/tmp/rustysquid 2>/dev/null || true
+	@ssh noah@192.168.50.1 "killall rustysquid 2>/dev/null || true; sleep 1; \
+		chmod +x /tmp/rustysquid; \
+		nohup /tmp/rustysquid > /tmp/rustysquid.log 2>&1 & \
+		iptables -t nat -D PREROUTING -i br-lan -p tcp --dport 80 -j REDIRECT --to-port 3128 2>/dev/null || true; \
+		iptables -t nat -D PREROUTING -i br-lan -p tcp --dport 443 -j REDIRECT --to-port 3128 2>/dev/null || true; \
+		iptables -t nat -A PREROUTING -i br-lan -p tcp --dport 80 -j REDIRECT --to-port 3128; \
+		iptables -t nat -A PREROUTING -i br-lan -p tcp --dport 443 -j REDIRECT --to-port 3128; \
+		echo '✅ Deployed with transparent proxy'"
 
 # Verification
-verify: ## Verify cache is working
-	@echo "🔍 Verifying cache proxy..."
-	@../deno run --allow-all ../scripts/verify-cache.ts
+verify: ## Verify proxy deployment with comprehensive checks
+	@echo "🔍 Verifying proxy deployment..."
+	@./verify_proxy.sh
+
+smoke-test: ## Run post-deployment smoke test
+	@echo "🔥 Running smoke test..."
+	@deno run --allow-net --allow-run --allow-env smoke-test.ts
+
+test-smoke: ## Run smoke test unit tests
+	@echo "🧪 Testing smoke test suite..."
+	@deno test --allow-env smoke-test.test.ts
 
 bench: ## Run benchmarks
 	@echo "⚡ Running benchmarks..."

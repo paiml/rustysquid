@@ -82,12 +82,13 @@ fi
 echo "   Setting up transparent proxy rules..."
 
 # Remove any existing rules first
-iptables -t nat -D PREROUTING -i br-lan -p tcp --dport 80 -j REDIRECT --to-port 3128 2>/dev/null || true
-iptables -t nat -D PREROUTING -i br-lan -p tcp --dport 443 -j REDIRECT --to-port 3128 2>/dev/null || true
+iptables -t nat -D PREROUTING -i br0 -p tcp --dport 80 -j REDIRECT --to-port 3128 2>/dev/null || true
+iptables -t nat -D PREROUTING -i br0 -p tcp --dport 443 -j REDIRECT --to-port 3128 2>/dev/null || true
 
-# Add transparent proxy rules for HTTP/HTTPS traffic from LAN
-iptables -t nat -A PREROUTING -i br-lan -p tcp --dport 80 -j REDIRECT --to-port 3128
-iptables -t nat -A PREROUTING -i br-lan -p tcp --dport 443 -j REDIRECT --to-port 3128
+# Add transparent proxy rule for HTTP traffic ONLY
+# WARNING: NEVER intercept HTTPS (port 443) - it breaks SSL/TLS connections!
+iptables -t nat -A PREROUTING -i br0 -p tcp --dport 80 -j REDIRECT --to-port 3128
+# HTTPS traffic passes through normally - no interception
 
 # Allow traffic to the proxy port
 iptables -D INPUT -p tcp --dport 3128 -j ACCEPT 2>/dev/null || true
@@ -118,5 +119,5 @@ EOF
 echo
 echo "=== Deployment Complete ==="
 echo "Proxy URL: http://$ROUTER_IP:3128"
-echo "Transparent proxy: Active for HTTP/HTTPS traffic from LAN"
+echo "Transparent proxy: Active for HTTP traffic only (HTTPS passes through)"
 echo "Logs: ssh $ROUTER_USER@$ROUTER_IP 'tail -f /tmp/rustysquid.log'"
