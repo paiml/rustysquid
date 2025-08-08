@@ -1,5 +1,7 @@
 # RustySquid 🦀🦑
 
+[![Rust CI](https://github.com/paiml/rustysquid/actions/workflows/rust.yml/badge.svg)](https://github.com/paiml/rustysquid/actions/workflows/rust.yml)
+[![CI](https://github.com/paiml/rustysquid/actions/workflows/ci.yml/badge.svg)](https://github.com/paiml/rustysquid/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/rustysquid.svg)](https://crates.io/crates/rustysquid)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
